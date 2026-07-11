@@ -1,18 +1,13 @@
 "use client";
 
 import { DragEvent, ChangeEvent, useEffect, useState } from "react";
+import { upload } from "@vercel/blob/client";
+import type { Clip, DevDiagnostics } from "@/lib/types";
+
 type VideoInfo = {
   title: string;
   channelName: string;
   thumbnailUrl: string;
-};
-type Clip = {
-  start: string;
-  end: string;
-  viralScore: number;
-  title: string;
-  reason: string;
-  caption: string;
 };
 
 type AnalysisMode = "youtube" | "upload" | null;
@@ -70,6 +65,8 @@ function formatFileSize(bytes: number) {
   return `${bytes} bytes`;
 }
 
+const isDev = process.env.NODE_ENV === "development";
+
 export default function Home() {
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -79,8 +76,14 @@ export default function Home() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadPreviewUrl, setUploadPreviewUrl] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(null);
   const [isDragActive, setIsDragActive] = useState(false);
+  const [processingStage, setProcessingStage] = useState<
+    "uploading" | "transcribing" | "analyzing" | null
+  >(null);
+  const [diagnostics, setDiagnostics] = useState<DevDiagnostics | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   useEffect(() => {
     if (!uploadFile) {
@@ -100,6 +103,8 @@ export default function Home() {
     setTranscriptMessage(null);
     setUploadError(null);
     setAnalysisMode(null);
+    setDiagnostics(null);
+    setProcessingStage(null);
   }
 
   async function handleAnalyze() {
@@ -111,6 +116,7 @@ export default function Home() {
     resetAnalysisState();
     setIsAnalyzing(true);
     setAnalysisMode("youtube");
+    setProcessingStage("transcribing");
 
     try {
       const response = await fetch("/api/youtube", {
@@ -134,6 +140,9 @@ export default function Home() {
       });
       setClips(data.clips ?? []);
       setTranscriptMessage(data.transcriptUnavailable ?? null);
+      if (data.diagnostics) {
+        setDiagnostics(data.diagnostics);
+      }
     } catch (error) {
       console.error(error);
       alert(
@@ -141,6 +150,7 @@ export default function Home() {
       );
     } finally {
       setIsAnalyzing(false);
+      setProcessingStage(null);
     }
   }
 
@@ -154,6 +164,13 @@ export default function Home() {
     const acceptedTypes = ["video/mp4", "video/quicktime", "video/webm"];
     if (!acceptedTypes.includes(file.type)) {
       setUploadError("Only MP4, MOV, and WebM files are supported.");
+      setUploadFile(null);
+      return;
+    }
+
+    const maxSize = 500 * 1_000_000;
+    if (file.size > maxSize) {
+      setUploadError("File size must be under 500 MB.");
       setUploadFile(null);
       return;
     }
@@ -182,7 +199,7 @@ export default function Home() {
     setIsDragActive(false);
   }
 
-  function handleAnalyzeUpload() {
+  async function handleAnalyzeUpload() {
     if (!uploadFile) {
       setUploadError("Select a video file before analyzing.");
       return;
@@ -191,11 +208,57 @@ export default function Home() {
     resetAnalysisState();
     setIsAnalyzing(true);
     setAnalysisMode("upload");
+    setProcessingStage("uploading");
 
-    setTimeout(() => {
-      setClips(demoClips);
+    try {
+      const blob = await upload(uploadFile.name, uploadFile, {
+        access: "public",
+        handleUploadUrl: "/api/blob-upload",
+        onUploadProgress: (progress) => {
+          setUploadProgress(Math.round((progress.loaded / progress.total) * 100));
+        },
+      });
+
+      setUploadProgress(100);
+      setProcessingStage("transcribing");
+
+      const transcriptionResponse = await fetch("/api/upload", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          blobUrl: blob.url,
+          fileName: uploadFile.name,
+        }),
+      });
+
+      if (!transcriptionResponse.ok) {
+        const errorData = await transcriptionResponse.json();
+        throw new Error(errorData.error || "Transcription failed");
+      }
+
+      setProcessingStage("analyzing");
+      const analysisData = await transcriptionResponse.json();
+
+      if (analysisData.error) {
+        throw new Error(analysisData.error);
+      }
+
+      setClips(analysisData.clips ?? []);
+      if (analysisData.diagnostics) {
+        setDiagnostics(analysisData.diagnostics);
+      }
+    } catch (error) {
+      console.error(error);
+      setUploadError(
+        error instanceof Error ? error.message : "Upload failed. Please try again."
+      );
+    } finally {
       setIsAnalyzing(false);
-    }, 700);
+      setProcessingStage(null);
+      setUploadProgress(0);
+    }
   }
 
   return (
@@ -233,24 +296,24 @@ export default function Home() {
               placeholder="Paste a YouTube link..."
               className="min-h-14 flex-1 rounded-xl border border-white/10 bg-black px-5 text-white outline-none placeholder:text-white/30 focus:border-purple-400"
             />
- 
+
             <button
               onClick={handleAnalyze}
               disabled={isAnalyzing}
               className="min-h-14 rounded-xl bg-purple-500 px-7 font-semibold hover:bg-purple-400 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isAnalyzing ? "Analyzing..." : "Analyze video"}
+              {isAnalyzing && analysisMode === "youtube" ? "Analyzing..." : "Analyze video"}
             </button>
           </div>
- 
+
           <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-6">
             <div className="mb-4 flex items-center justify-between gap-3 text-sm font-semibold text-purple-300">
-              <div>Upload a video file for demo analysis</div>
+              <div>Upload a video file for analysis</div>
               <div className="rounded-full bg-white/5 px-3 py-1 text-white/60">
-                MP4, MOV, WebM
+                MP4, MOV, WebM (max 500 MB)
               </div>
             </div>
- 
+
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
@@ -281,7 +344,7 @@ export default function Home() {
                 <p className="text-sm text-red-300">{uploadError}</p>
               )}
             </div>
- 
+
             {uploadFile && (
               <div className="mt-5 grid gap-4 lg:grid-cols-[1.5fr_1fr]">
                 <div className="rounded-3xl border border-white/10 bg-black/40 p-4">
@@ -295,10 +358,10 @@ export default function Home() {
                     {formatFileSize(uploadFile.size)}
                   </p>
                   <p className="mt-4 text-sm text-white/60">
-                    Accepted formats: MP4, MOV, WebM.
+                    Transcription powered by OpenAI Whisper.
                   </p>
                 </div>
- 
+
                 {uploadPreviewUrl && (
                   <div className="rounded-3xl border border-white/10 bg-black/40 p-4">
                     <p className="text-sm uppercase tracking-widest text-white/40">
@@ -313,7 +376,7 @@ export default function Home() {
                 )}
               </div>
             )}
- 
+
             <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <button
                 onClick={handleAnalyzeUpload}
@@ -321,23 +384,32 @@ export default function Home() {
                 className="min-h-14 w-full rounded-xl bg-purple-500 px-7 py-3 text-sm font-semibold text-white hover:bg-purple-400 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
               >
                 {isAnalyzing && analysisMode === "upload"
-                  ? "Analyzing..."
+                  ? `${processingStage === "uploading" ? `Uploading ${uploadProgress}%` : processingStage === "transcribing" ? "Transcribing..." : "Analyzing..."}`
                   : "Analyze uploaded video"}
               </button>
               <p className="text-sm text-white/50">
-                Uploaded results are demo-only until real video processing is available.
+                Your video is processed securely and never stored.
               </p>
             </div>
           </div>
         </div>
 
-        {isAnalyzing && (
+        {isAnalyzing && !videoInfo && !clips.length && (
           <div className="mx-auto mt-16 max-w-3xl rounded-2xl border border-white/10 bg-white/5 p-8 text-center">
             <div className="text-4xl">🎥</div>
-            <h2 className="mt-4 text-2xl font-bold">Scanning your video</h2>
+            <h2 className="mt-4 text-2xl font-bold">
+              {processingStage === "uploading"
+                ? "Uploading your video"
+                : processingStage === "transcribing"
+                  ? "Transcribing audio"
+                  : "Analyzing transcript"}
+            </h2>
             <p className="mt-2 text-white/60">
-              Looking for strong hooks, reactions, payoffs, and replayable
-              moments...
+              {processingStage === "uploading"
+                ? "Securely uploading to cloud storage..."
+                : processingStage === "transcribing"
+                  ? "Converting speech to text using AI..."
+                  : "Finding strong moments..."}
             </p>
           </div>
         )}
@@ -383,7 +455,7 @@ export default function Home() {
                 </p>
                 {analysisMode === "upload" && (
                   <span className="rounded-full bg-purple-500/10 px-3 py-1 text-xs font-semibold uppercase text-purple-300">
-                    Demo results
+                    Transcript-based
                   </span>
                 )}
               </div>
@@ -440,6 +512,64 @@ export default function Home() {
               ))}
             </div>
           </section>
+        )}
+
+        {isDev && diagnostics && (
+          <div className="mx-auto mt-16 max-w-4xl">
+            <button
+              onClick={() => setShowDiagnostics(!showDiagnostics)}
+              className="rounded-xl border border-white/20 bg-white/5 px-4 py-2 text-sm font-semibold text-white/70 hover:bg-white/10"
+            >
+              {showDiagnostics ? "Hide" : "Show"} Dev Diagnostics
+            </button>
+
+            {showDiagnostics && (
+              <div className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-white/5 p-6 font-mono text-xs text-white/60">
+                <div>
+                  <span className="text-purple-300">routeStatus:</span>{" "}
+                  {diagnostics.routeStatus}
+                </div>
+                <div>
+                  <span className="text-purple-300">transcript.source:</span>{" "}
+                  {diagnostics.transcript.source}
+                </div>
+                <div>
+                  <span className="text-purple-300">transcript.status:</span>{" "}
+                  {diagnostics.transcript.status}
+                </div>
+                {diagnostics.transcript.transcriptLength && (
+                  <div>
+                    <span className="text-purple-300">transcriptLength:</span>{" "}
+                    {diagnostics.transcript.transcriptLength}
+                  </div>
+                )}
+                {diagnostics.analysis && (
+                  <>
+                    <div>
+                      <span className="text-purple-300">clipsSelected:</span>{" "}
+                      {diagnostics.analysis.clipsSelected}
+                    </div>
+                    <div>
+                      <span className="text-purple-300">
+                        scoringDurationMs:
+                      </span>{" "}
+                      {diagnostics.analysis.scoringDurationMs}
+                    </div>
+                  </>
+                )}
+                <div>
+                  <span className="text-purple-300">totalDurationMs:</span>{" "}
+                  {diagnostics.totalDurationMs}
+                </div>
+                {diagnostics.failureCode && (
+                  <div>
+                    <span className="text-red-300">failureCode:</span>{" "}
+                    {diagnostics.failureCode}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         )}
       </section>
     </main>
