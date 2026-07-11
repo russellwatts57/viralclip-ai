@@ -5,40 +5,9 @@ export async function POST(request: Request) {
   const body = (await request.json()) as HandleUploadBody;
 
   try {
-    // Check for required credentials
-    const hasOidcToken = process.env.VERCEL_OIDC_TOKEN;
-    const hasBlobStoreId = process.env.BLOB_STORE_ID;
-    const hasBlobToken = process.env.BLOB_READ_WRITE_TOKEN;
-
-    // OIDC is preferred (automatic on Vercel), but fallback to token-based auth
-    const hasCredentials = (hasOidcToken && hasBlobStoreId) || hasBlobToken;
-
-    if (!hasCredentials) {
-      console.error(
-        "Blob upload credentials missing. For Vercel deployment, ensure BLOB_STORE_ID is set. " +
-          "For local development, either run `vercel env pull` or set BLOB_READ_WRITE_TOKEN."
-      );
-
-      return NextResponse.json(
-        {
-          error:
-            "Upload configuration incomplete. Please check server logs and ensure environment variables are configured.",
-          details: {
-            hasOidcAuth: hasOidcToken && hasBlobStoreId,
-            hasTokenAuth: hasBlobToken,
-            setup: "For Vercel: Connect Blob store via Project tab. For local: Run 'vercel env pull' or set BLOB_READ_WRITE_TOKEN.",
-          },
-        },
-        { status: 503 }
-      );
-    }
-
     const jsonResponse = await handleUpload({
       body,
       request,
-      // Explicitly pass token if available (for local dev and fallback)
-      // On Vercel, SDK will use OIDC automatically, so this is optional
-      token: hasBlobToken || undefined,
       onBeforeGenerateToken: async () => {
         return {
           allowedContentTypes: ["video/mp4", "video/quicktime", "video/webm"],
@@ -53,7 +22,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(jsonResponse);
   } catch (error) {
-    // Log detailed error server-side
+    // Log detailed error server-side for debugging
     console.error("Blob upload error:", error);
 
     const errorMessage =
